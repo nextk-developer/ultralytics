@@ -22,6 +22,7 @@ Commands:
 """
 
 from ultralytics.utils import LOGGER, RUNS_DIR, SETTINGS, TESTS_RUNNING, colorstr
+import torch
 
 try:
     import os
@@ -83,6 +84,7 @@ def on_pretrain_routine_end(trainer):
             LOGGER.info(f"{PREFIX}view at http://127.0.0.1:5000 with 'mlflow server --backend-store-uri {uri}'")
         LOGGER.info(f"{PREFIX}disable with 'yolo settings mlflow=False'")
         mlflow.log_params(dict(trainer.args))
+        mlflow.pytorch.log_model(torch.nn.Module(), "model")
     except Exception as e:
         LOGGER.warning(f"{PREFIX}WARNING ⚠️ Failed to initialize: {e}\n" f"{PREFIX}WARNING ⚠️ Not tracking this run")
 
