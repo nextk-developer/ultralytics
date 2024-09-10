@@ -84,6 +84,20 @@ def on_pretrain_routine_end(trainer):
             LOGGER.info(f"{PREFIX}view at http://127.0.0.1:5000 with 'mlflow server --backend-store-uri {uri}'")
         LOGGER.info(f"{PREFIX}disable with 'yolo settings mlflow=False'")
         mlflow.log_params(dict(trainer.args))
+
+        mlflow.log_artifact(trainer.data["yaml_file"])
+        if trainer.data.get("train") is not None:
+            train_path = trainer.data.get("train")
+            if os.path.isfile(train_path) and train_path.endswith(".yaml"):
+                mlflow.log_artifact(train_path)
+        if trainer.data.get("val") is not None:
+            val_path = trainer.data.get("val")
+            if os.path.isfile(val_path) and val_path.endswith(".yaml"):
+                mlflow.log_artifact(val_path)
+        if trainer.data.get("test") is not None:
+            test_path = trainer.data.get("test")
+            if os.path.isfile(test_path) and test_path.endswith(".yaml"):
+                mlflow.log_artifact(test_path)
         mlflow.pytorch.log_model(torch.nn.Module(), "model")
     except Exception as e:
         LOGGER.warning(f"{PREFIX}WARNING ⚠️ Failed to initialize: {e}\n" f"{PREFIX}WARNING ⚠️ Not tracking this run")
