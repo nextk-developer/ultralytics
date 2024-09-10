@@ -22,14 +22,16 @@ Commands:
 """
 
 from ultralytics.utils import LOGGER, RUNS_DIR, SETTINGS, TESTS_RUNNING, colorstr
+from ultralytics import YOLO
 import torch
+import struct
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 
 try:
     import os
 
-    assert not TESTS_RUNNING or "test_mlflow" in os.environ.get(
-        "PYTEST_CURRENT_TEST", ""
-    )  # do not log pytest
+    assert not TESTS_RUNNING or "test_mlflow" in os.environ.get("PYTEST_CURRENT_TEST", "")  # do not log pytest
     assert SETTINGS["mlflow"] is True  # verify integration is enabled
     import mlflow
 
@@ -74,11 +76,7 @@ def on_pretrain_routine_end(trainer):
     mlflow.set_tracking_uri(uri)
 
     # Set experiment and run names
-    experiment_name = (
-        os.environ.get("MLFLOW_EXPERIMENT_NAME")
-        or trainer.args.project
-        or "/Shared/YOLOv8"
-    )
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME") or trainer.args.project or "/Shared/YOLOv8"
     run_name = os.environ.get("MLFLOW_RUN") or trainer.args.name
     mlflow.set_experiment(experiment_name)
 
@@ -87,31 +85,26 @@ def on_pretrain_routine_end(trainer):
         active_run = mlflow.active_run() or mlflow.start_run(run_name=run_name)
         LOGGER.info(f"{PREFIX}logging run_id({active_run.info.run_id}) to {uri}")
         if Path(uri).is_dir():
-            LOGGER.info(
-                f"{PREFIX}view at http://127.0.0.1:5000 with 'mlflow server --backend-store-uri {uri}'"
-            )
+            LOGGER.info(f"{PREFIX}view at http://127.0.0.1:5000 with 'mlflow server --backend-store-uri {uri}'")
         LOGGER.info(f"{PREFIX}disable with 'yolo settings mlflow=False'")
         mlflow.log_params(dict(trainer.args))
 
-        mlflow.log_artifact(trainer.data["yaml_file"])
+        mlflow.log_artifact(trainer.data["yaml_file"], "data")
         if trainer.data.get("train") is not None:
             train_path = trainer.data.get("train")
             if os.path.isfile(train_path) and train_path.endswith(".txt"):
-                mlflow.log_artifact(train_path)
+                mlflow.log_artifact(train_path, "data")
         if trainer.data.get("val") is not None:
             val_path = trainer.data.get("val")
             if os.path.isfile(val_path) and val_path.endswith(".txt"):
-                mlflow.log_artifact(val_path)
+                mlflow.log_artifact(val_path, "data")
         if trainer.data.get("test") is not None:
             test_path = trainer.data.get("test")
             if os.path.isfile(test_path) and test_path.endswith(".txt"):
-                mlflow.log_artifact(test_path)
+                mlflow.log_artifact(test_path, "data")
         mlflow.pytorch.log_model(torch.nn.Module(), "model")
     except Exception as e:
-        LOGGER.warning(
-            f"{PREFIX}WARNING ⚠️ Failed to initialize: {e}\n"
-            f"{PREFIX}WARNING ⚠️ Not tracking this run"
-        )
+        LOGGER.warning(f"{PREFIX}WARNING ⚠️ Failed to initialize: {e}\n" f"{PREFIX}WARNING ⚠️ Not tracking this run")
 
 
 def on_train_epoch_end(trainer):
@@ -120,9 +113,7 @@ def on_train_epoch_end(trainer):
         mlflow.log_metrics(
             metrics={
                 **sanitize_dict(trainer.lr),
-                **sanitize_dict(
-                    trainer.label_loss_items(trainer.tloss, prefix="train")
-                ),
+                **sanitize_dict(trainer.label_loss_items(trainer.tloss, prefix="train")),
             },
             step=trainer.epoch,
         )
@@ -138,19 +129,55 @@ def on_train_end(trainer):
     """Log model artifacts at the end of the training."""
     if not mlflow:
         return
-    mlflow.log_artifact(
-        str(trainer.best.parent)
-    )  # log save_dir/weights directory with best.pt and last.pt
+
+    # region convert (pt) model into wts format
+    pt_model_path = str(trainer.best)
+    wts_model_path = os.path.splitext(pt_model_path)[0] + ".wts"
+    model = torch.load(pt_model_path, map_location="cpu")
+
+    if model["model"] is None:
+        model["model"] = YOLO(pt_model_path).model
+
+    model = model["model"].float()
+    delattr(model.model[-1], "anchors")
+
+    model.to("cpu").eval()
+    with open(wts_model_path, "w") as f:
+        f.write("{}\n".format(len(model.state_dict().keys())))
+        for k, v in model.state_dict().items():
+            vr = v.reshape(-1).cpu().numpy()
+            f.write("{} {} ".format(k, len(vr)))
+            for vv in vr:
+                f.write(" ")
+                f.write(struct.pack(">f", float(vv)).hex())
+            f.write("\n")
+    # endregion
+
+    # region encrypt wts model
+    _key = bytes([0xFF, 0x01, 0xEE, 0xD7, 0xC4, 0xB5, 0x02, 0x07, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0xAE, 0xFF])
+    _iv = bytes([0x1F, 0x5A, 0x9F, 0x0B, 0x3F, 0xFC, 0xFF, 0xCD, 0xFF, 0x00, 0x45, 0x78, 0x26, 0x74, 0x69, 0xFF])
+
+    enc_file_path = os.path.splitext(wts_model_path)[0] + "_enc.wts"
+    with open(wts_model_path, "r", newline="\r\n") as f:
+        buffer = f.read().encode("utf-8")
+
+    aes = AES.new(_key, AES.MODE_CBC, iv=_iv)
+
+    block_size = 16
+    padded_buffer = pad(buffer, block_size)
+    encrypted_text = aes.encrypt(padded_buffer)
+
+    with open(enc_file_path, "wb") as f:
+        f.write(encrypted_text)
+    # endregion
+
+    mlflow.log_artifact(str(trainer.best.parent))  # log save_dir/weights directory with best.pt and last.pt
     for f in trainer.save_dir.glob("*"):  # log all other files in save_dir
         if f.suffix in {".png", ".jpg", ".csv", ".pt", ".yaml"}:
             mlflow.log_artifact(str(f))
-    keep_run_active = (
-        os.environ.get("MLFLOW_KEEP_RUN_ACTIVE", "False").lower() == "true"
-    )
+    keep_run_active = os.environ.get("MLFLOW_KEEP_RUN_ACTIVE", "False").lower() == "true"
     if keep_run_active:
-        LOGGER.info(
-            f"{PREFIX}mlflow run still alive, remember to close it using mlflow.end_run()"
-        )
+        LOGGER.info(f"{PREFIX}mlflow run still alive, remember to close it using mlflow.end_run()")
     else:
         mlflow.end_run()
         LOGGER.debug(f"{PREFIX}mlflow run ended")
