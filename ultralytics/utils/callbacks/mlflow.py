@@ -28,6 +28,38 @@ import struct
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
+import psycopg2
+
+
+class Database:
+    def __init__(self):
+        self.db = psycopg2.connect(
+            host="192.168.10.42",
+            port="42010",
+            dbname="mlops",
+            user="nextk",
+            password="nextknextk",
+        )
+        self.cursor = self.db.cursor()
+        return
+
+    def __del__(self):
+        self.db.close()
+        self.cursor.close()
+        return
+
+    def execute(self, query):
+        self.cursor.execute(query)
+        return
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+    def commit(self):
+        self.db.commit()
+        return
+
+
 try:
     import os
 
@@ -103,6 +135,14 @@ def on_pretrain_routine_end(trainer):
             if os.path.isfile(test_path) and test_path.endswith(".txt"):
                 mlflow.log_artifact(test_path, "data")
         mlflow.pytorch.log_model(torch.nn.Module(), "model")
+
+        db = Database()
+        try:
+            db.execute(f"UPDATE training SET model_id='{active_run.info.run_id}' WHERE id='{run_name}'")
+            db.commit()
+        except Exception as e:
+            print("[DB Update Error] ", e)
+
     except Exception as e:
         LOGGER.warning(f"{PREFIX}WARNING ⚠️ Failed to initialize: {e}\n" f"{PREFIX}WARNING ⚠️ Not tracking this run")
 
@@ -117,6 +157,14 @@ def on_train_epoch_end(trainer):
             },
             step=trainer.epoch,
         )
+
+        run_name = os.environ.get("MLFLOW_RUN") or trainer.args.name
+        db = Database()
+        try:
+            db.execute(f"UPDATE training SET current_epoch={trainer.epoch} WHERE id='{run_name}'")
+            db.commit()
+        except Exception as e:
+            print("[DB Update Error] ", e)
 
 
 def on_fit_epoch_end(trainer):
