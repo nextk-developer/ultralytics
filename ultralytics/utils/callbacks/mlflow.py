@@ -161,7 +161,7 @@ def on_train_epoch_end(trainer):
         run_name = os.environ.get("MLFLOW_RUN") or trainer.args.name
         db = Database()
         try:
-            db.execute(f"UPDATE training SET current_epoch={trainer.epoch} WHERE id='{run_name}'")
+            db.execute(f"UPDATE training SET current_epoch={trainer.epoch+1} WHERE id='{run_name}'")
             db.commit()
         except Exception as e:
             print("[DB Update Error] ", e)
